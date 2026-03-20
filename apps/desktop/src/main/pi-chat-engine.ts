@@ -396,6 +396,41 @@ function extractUrlFromOutput(output: string): string | null {
   return m ? m[0].replace('0.0.0.0', 'localhost') : null;
 }
 
+function resolveDevServerShell(command: string): { file: string; args: string[] } {
+  if (process.platform === 'win32') {
+    return {
+      file: process.env['ComSpec']?.trim() || 'cmd.exe',
+      args: ['/d', '/s', '/c', command],
+    };
+  }
+
+  return {
+    file: process.env['SHELL']?.trim() || 'bash',
+    args: ['-lc', command],
+  };
+}
+
+function killDevServerProcess(pid: number | undefined): void {
+  if (!pid || pid <= 0) {
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    killer.unref();
+    return;
+  }
+
+  try {
+    process.kill(-pid, 'SIGTERM');
+  } catch {
+    // Ignore termination failures for already-exited process groups.
+  }
+}
+
 const startDevServerTool: ToolDefinition = {
   name: 'start_dev_server',
   label: 'Start Dev Server',
@@ -426,15 +461,47 @@ const startDevServerTool: ToolDefinition = {
 
     let output = '';
 
-    const child = spawn('bash', ['-c', command], {
+    const launcher = resolveDevServerShell(command);
+    const child = spawn(launcher.file, launcher.args, {
       cwd,
       detached: true, // new process group — immune to parent signals
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, BROWSER: 'none', FORCE_COLOR: '0' },
+      windowsHide: true,
     });
 
     // Unref so the Electron process can exit even if the dev server is still running
     child.unref();
+
+    const spawnOutcome = await new Promise<{ ok: true } | { ok: false; error: Error }>((resolve) => {
+      let settled = false;
+      const finish = (result: { ok: true } | { ok: false; error: Error }) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      child.once('spawn', () => finish({ ok: true }));
+      child.once('error', (error) => finish({ ok: false, error }));
+    });
+
+    if (!spawnOutcome.ok) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Failed to start dev server command "${command}": ${spawnOutcome.error.message}`,
+          },
+        ],
+        details: {
+          cwd,
+          command,
+          shell: launcher.file,
+          args: launcher.args,
+          error: spawnOutcome.error.message,
+        },
+        isError: true,
+      };
+    }
 
     const collectOutput = (chunk: Buffer) => {
       output += chunk.toString();
@@ -446,7 +513,7 @@ const startDevServerTool: ToolDefinition = {
     child.stderr?.on('data', collectOutput);
 
     const killFn = () => {
-      try { process.kill(-child.pid!, 'SIGTERM'); } catch { /* ignore */ }
+      killDevServerProcess(child.pid);
     };
 
     runningDevServers.set(cwd, { pid: child.pid!, kill: killFn });
