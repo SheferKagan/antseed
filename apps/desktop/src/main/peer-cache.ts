@@ -56,16 +56,54 @@ export function defaultNetworkStats(): DashboardNetworkStats {
   };
 }
 
+function parsePeerAddress(publicAddress: string): { host: string; port: number } {
+  const addr = publicAddress.trim();
+  if (addr.length === 0) {
+    return { host: '', port: 0 };
+  }
+
+  if (addr.startsWith('[')) {
+    const closingBracket = addr.indexOf(']');
+    if (closingBracket > -1) {
+      const host = addr.slice(0, closingBracket + 1);
+      const suffix = addr.slice(closingBracket + 1);
+      const portCandidate = suffix.startsWith(':') ? suffix.slice(1) : '';
+      if (/^\d+$/.test(portCandidate)) {
+        return { host, port: Number(portCandidate) || 0 };
+      }
+    }
+    return { host: addr, port: 0 };
+  }
+
+  const firstColon = addr.indexOf(':');
+  const lastColon = addr.lastIndexOf(':');
+  if (firstColon !== lastColon) {
+    return { host: addr, port: 0 };
+  }
+  if (lastColon === -1) {
+    return { host: addr, port: 0 };
+  }
+
+  const portCandidate = addr.slice(lastColon + 1);
+  if (!/^\d+$/.test(portCandidate)) {
+    return { host: addr, port: 0 };
+  }
+
+  return {
+    host: addr.slice(0, lastColon),
+    port: Number(portCandidate) || 0,
+  };
+}
+
 export function parsePeerFromRaw(pr: Record<string, unknown>): DashboardNetworkPeer | null {
   if (typeof pr.peerId !== 'string') return null;
 
   let peerHost = '';
   let peerPort = 0;
   if (typeof pr.publicAddress === 'string') {
-    const addr = pr.publicAddress as string;
-    const lastColon = addr.lastIndexOf(':');
-    peerHost = lastColon > -1 ? addr.slice(0, lastColon) : addr;
-    peerPort = lastColon > -1 ? Number(addr.slice(lastColon + 1)) || 0 : 0;
+    const parsedAddress = parsePeerAddress(pr.publicAddress);
+    peerHost = parsedAddress.host;
+    peerPort = parsedAddress.port;
   }
 
   return {
